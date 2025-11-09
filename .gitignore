@@ -1,0 +1,29 @@
+# Temporary files
+*.tmp
+*.swp
+*.swo
+*~
+
+# Editor files
+.vscode/
+.idea/
+*.sublime-*
+
+# Claude Code
+.claude/
+
+# Test artifacts
+test/*.err
+test/.cram/
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Build artifacts (if any)
+*.pkg.tar.*
+*.sig
+
+# Local development
+.env
+.local

@@ -1,0 +1,311 @@
+#!/bin/bash
+# aurpick - Interactive AUR package version picker
+# License: MIT
+# Usage: aurpick <package-name>
+
+VERSION="1.0.0"
+
+# Color definitions
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+BLUE='\033[0;34m'
+NC='\033[0m' # No Color
+
+# Check if running as root
+if [[ $EUID -eq 0 ]]; then
+    echo -e "${RED}==>${NC} DO NOT run this script as root" >&2
+    echo -e "${RED}==>${NC} makepkg refuses to run as root for security reasons" >&2
+    exit 1
+fi
+
+# Print colored messages
+info() { echo -e "${BLUE}==>${NC} $*"; }
+success() { echo -e "${GREEN}==>${NC} $*"; }
+warning() { echo -e "${YELLOW}==>${NC} $*"; }
+error() { echo -e "${RED}==>${NC} $*" >&2; }
+
+# Parse version from PKGBUILD content (accepts content via stdin or parameter)
+parse_pkgbuild_version() {
+    local content="$1"
+    local pkgver pkgrel epoch
+
+    # If no parameter, read from stdin
+    [[ -z "$content" ]] && content=$(cat)
+
+    # Extract version components
+    pkgver=$(echo "$content" | grep -m1 '^pkgver=' | cut -d'=' -f2 | tr -d '"' | tr -d "'")
+    pkgrel=$(echo "$content" | grep -m1 '^pkgrel=' | cut -d'=' -f2 | tr -d '"' | tr -d "'")
+    epoch=$(echo "$content" | grep -m1 '^epoch=' | cut -d'=' -f2 | tr -d '"' | tr -d "'")
+
+    # Handle empty values
+    [[ -z "$pkgver" ]] && pkgver="?"
+    [[ -z "$pkgrel" ]] && pkgrel="?"
+
+    # Build version string with epoch if present
+    if [[ -n "$epoch" && "$epoch" != "?" ]]; then
+        echo "${epoch}:${pkgver}-${pkgrel}"
+    else
+        echo "${pkgver}-${pkgrel}"
+    fi
+}
+
+# Ask user for yes/no confirmation
+# Usage: confirm "Question?" [default]
+# Returns: 0 for yes, 1 for no
+confirm() {
+    local prompt="$1"
+    local default="${2:-N}"
+
+    # Format prompt based on default
+    [[ "$default" =~ ^[Yy]$ ]] && prompt="$prompt [Y/n] " || prompt="$prompt [y/N] "
+
+    read -p "$prompt" -n 1 -r
+    echo
+
+    # Check reply (use default if empty)
+    [[ "${REPLY:-$default}" =~ ^[Yy]$ ]]
+}
+
+# Check dependencies
+check_dependencies() {
+    local missing=()
+    for cmd in git fzf makepkg; do
+        if ! command -v "$cmd" &>/dev/null; then
+            missing+=("$cmd")
+        fi
+    done
+
+    if [[ ${#missing[@]} -gt 0 ]]; then
+        error "Missing dependencies: ${missing[*]}"
+        error "Please install: sudo pacman -S git fzf base-devel"
+        exit 1
+    fi
+}
+
+# Check if official repository package
+check_official_repo() {
+    local package="$1"
+    local repo
+    repo=$(pacman -Si "$package" 2>/dev/null | grep -m1 '^Repository' | awk '{print $3}')
+
+    # Check if package is from official repositories (core, extra, multilib, etc.)
+    if [[ "$repo" =~ ^(core|extra|multilib|core-testing|extra-testing|multilib-testing)$ ]]; then
+        warning "[$package] is an official repository package, not an AUR package"
+
+        # Check if downgrade is installed
+        if command -v downgrade &>/dev/null; then
+            info "Detected downgrade tool, invoking for you..."
+            echo
+            exec sudo downgrade "$package"
+        else
+            error "Official packages require the downgrade tool"
+            info "Please install downgrade first:"
+            echo "  https://github.com/archlinux-downgrade/downgrade"
+            echo "  https://aur.archlinux.org/packages/downgrade"
+            exit 1
+        fi
+    fi
+}
+
+# Extract version from PKGBUILD file
+get_pkgbuild_version() {
+    [[ -f PKGBUILD ]] && parse_pkgbuild_version "$(cat PKGBUILD)" || echo "?"
+}
+
+# Main function
+main() {
+    local dev_mode=false
+    local package=""
+
+    # Parse arguments
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --version|-v)
+                echo "aurpick version $VERSION"
+                exit 0
+                ;;
+            --dev)
+                dev_mode=true
+                shift
+                ;;
+            *)
+                package="$1"
+                shift
+                ;;
+        esac
+    done
+
+    # Check arguments
+    if [[ -z "$package" ]]; then
+        error "Usage: $0 [--dev] <package-name>"
+        echo "Example: $0 yay"
+        echo "Options:"
+        echo "  --dev       Development mode (preserve temporary files)"
+        echo "  --version   Show version information"
+        exit 1
+    fi
+
+    # Check dependencies
+    check_dependencies
+
+    # Check official repository
+    check_official_repo "$package"
+
+    # Set working directory
+    local work_dir="/tmp/aurpick-$package"
+
+    # Setup cleanup trap (skip in dev mode)
+    if [[ "$dev_mode" == false ]]; then
+        trap 'rm -rf "$work_dir" 2>/dev/null' EXIT
+    else
+        info "Dev mode: temporary files will be preserved in $work_dir"
+    fi
+
+    # Clone or reuse repository
+    if [[ "$dev_mode" == true && -d "$work_dir/.git" ]]; then
+        info "Reusing existing repository in $work_dir..."
+        cd "$work_dir" || {
+            error "Failed to access directory $work_dir"
+            exit 1
+        }
+        git checkout -q master 2>/dev/null || true
+        git fetch --quiet 2>/dev/null || true
+    else
+        info "Fetching AUR repository for $package..."
+        rm -rf "$work_dir"
+        git clone "https://aur.archlinux.org/$package.git" "$work_dir" || {
+            error "Clone failed, package may not exist"
+            exit 1
+        }
+        cd "$work_dir" || {
+            error "Failed to access directory $work_dir"
+            exit 1
+        }
+
+        # Check if repository has any commits (detect empty repository)
+        if ! git rev-list --count HEAD >/dev/null 2>&1; then
+            error "Package repository is empty or package does not exist"
+            exit 1
+        fi
+    fi
+
+    # Get currently installed version
+    local current_version=""
+    if pacman -Q "$package" &>/dev/null; then
+        current_version=$(pacman -Q "$package" 2>/dev/null | awk '{print $2}')
+        info "Currently installed: $current_version"
+    fi
+
+    # Use fzf to select version (with streaming data)
+    info "Loading version history (you can select while loading)..."
+
+    # Random prompt tips
+    local tips=(
+        "Type to search • ESC/Ctrl+C/Ctrl+D to exit"
+        "Use arrow keys to navigate • ESC to cancel"
+        "Search by version or hash • Ctrl+C to quit"
+        "Press Enter to select • Ctrl+D to abort"
+        "Filter results by typing • ESC to exit"
+    )
+    local random_tip="${tips[$RANDOM % ${#tips[@]}]}"
+
+    # Build header with current version info (align with data columns)
+    local hash_header
+    local version_header
+    local time_header="Time"
+    hash_header=$(printf "%-16s" "Git Hash")
+    version_header=$(printf "%-20s" "Version")
+    local header_text="${hash_header}${version_header}${time_header}"
+
+    if [[ -n "$current_version" ]]; then
+        header_text="$header_text"$'\n'"Currently installed: $current_version"
+    else
+        header_text="$header_text"$'\n'"No version matches installed"
+    fi
+
+    local selected
+    selected=$(
+        git log --format="%H" | while read -r hash; do
+            # Use git show to read PKGBUILD without checking out (much faster)
+            pkgbuild_content=$(git show "$hash:PKGBUILD" 2>/dev/null)
+
+            # Extract version info from PKGBUILD content
+            if [[ -n "$pkgbuild_content" ]]; then
+                version=$(echo "$pkgbuild_content" | parse_pkgbuild_version)
+                [[ -z "$version" || "$version" == "?-?" ]] && version="?"
+            else
+                version="?"
+            fi
+
+            short_hash=$(echo "$hash" | cut -c1-7)
+            date=$(git log -1 --format="%ai" "$hash" | awk '{print $1, $2}')
+
+            # Output formatted line
+            printf "%-16s%-20s%-20s\n" "$short_hash" "$version" "$date"
+        done | \
+        fzf --ansi \
+            --prompt="$random_tip > " \
+            --header="$header_text" \
+            --preview="git -C $work_dir show --stat {1} && \
+                       echo && echo '━━━━━ PKGBUILD ━━━━━' && echo && \
+                       git -C $work_dir show {1}:PKGBUILD" \
+            --preview-window=right:50%:wrap
+    )
+
+    if [[ -z "$selected" ]]; then
+        warning "Operation cancelled"
+        exit 0
+    fi
+
+    # Extract selected hash
+    local selected_hash
+    local selected_version
+    selected_hash=$(echo "$selected" | awk '{print $1}')
+    selected_version=$(echo "$selected" | awk '{print $2}')
+
+    info "Switching to commit $selected_hash (version: $selected_version)..."
+    git checkout "$selected_hash" || {
+        error "Switch failed"
+        exit 1
+    }
+
+    # Display version info to be built
+    echo
+    success "Switched to historical version:"
+    echo "  Package: $package"
+    echo "  Version: $selected_version"
+    echo "  Commit: $selected_hash"
+    echo
+
+    # Ask if view PKGBUILD
+    confirm "View PKGBUILD?" && less PKGBUILD
+
+    # Ask if skip checksums
+    local makepkg_flags=(-si)
+    if confirm "Skip all checksum verification?"; then
+        makepkg_flags=(--skipchecksums -si)
+        info "Will use --skipchecksums flag"
+    fi
+
+    # Ask if continue building
+    if ! confirm "Continue to build and install?"; then
+        warning "Build cancelled"
+        exit 0
+    fi
+
+    # Build and install
+    info "Building $package-$selected_version..."
+    if makepkg "${makepkg_flags[@]}"; then
+        echo
+        success "Installation complete!"
+        echo
+        info "To prevent auto-updates, add to /etc/pacman.conf:"
+        echo "  IgnorePkg = $package"
+    else
+        error "Build failed"
+        exit 1
+    fi
+}
+
+main "$@"
