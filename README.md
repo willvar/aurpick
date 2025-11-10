@@ -13,9 +13,9 @@ Easily install any version of AUR packages — current, historical, or newer.
 - **Complete History Browsing** - View all Git commit history of the package
 - **Interactive Selection** - Powerful search and filtering via fzf
 - **Version Information** - Automatically parse PKGBUILD version from each commit
-- **Highlight Current Version** - Clearly mark the currently installed version
 - **Live Preview** - View commit information and PKGBUILD content
 - **Official Package Redirect** - Auto-detect official repo packages and invoke `downgrade`
+- **GitHub Mirror Support** - Optional GitHub AUR mirror for package fetching
 - **Development Mode** - Preserve temporary files for debugging
 
 ## Dependencies
@@ -42,13 +42,16 @@ aurpick <package-name>
 # Rollback yay after a problematic update
 aurpick yay
 
+# Use GitHub AUR mirror (read-only experimental mirror)
+aurpick --github yay
+
 # Development mode (preserve temporary files for debugging)
 aurpick --dev yay
 ```
 
 ## How It Works
 
-1. Clone the AUR Git repository for the specified package
+1. Clone the AUR Git repository for the specified package (from official AUR or GitHub mirror)
 2. Traverse all commit history and extract PKGBUILD version information
 3. Provide interactive selection interface via fzf
 4. Switch to the selected historical commit
@@ -57,6 +60,7 @@ aurpick --dev yay
 ## Options
 
 - `--dev` - Development mode, preserve temporary files in `/tmp/aurpick-<package>`
+- `--github` - Use GitHub AUR mirror instead of official AUR source
 - `--version` / `-v` - Show version information
 
 ## Usage Tips
