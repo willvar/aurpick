@@ -116,6 +116,7 @@ get_pkgbuild_version() {
 # Main function
 main() {
     local dev_mode=false
+    local use_github=false
     local package=""
 
     # Parse arguments
@@ -129,6 +130,10 @@ main() {
                 dev_mode=true
                 shift
                 ;;
+            --github)
+                use_github=true
+                shift
+                ;;
             *)
                 package="$1"
                 shift
@@ -138,10 +143,12 @@ main() {
 
     # Check arguments
     if [[ -z "$package" ]]; then
-        error "Usage: $0 [--dev] <package-name>"
+        error "Usage: $0 [--dev] [--github] <package-name>"
         echo "Example: $0 yay"
+        echo "         $0 --github yay"
         echo "Options:"
         echo "  --dev       Development mode (preserve temporary files)"
+        echo "  --github    Use GitHub AUR mirror instead of aur.archlinux.org"
         echo "  --version   Show version information"
         exit 1
     fi
@@ -169,15 +176,32 @@ main() {
             error "Failed to access directory $work_dir"
             exit 1
         }
-        git checkout -q master 2>/dev/null || true
+        # Switch to appropriate branch based on source
+        if [[ "$use_github" == true ]]; then
+            git checkout -q "$package" 2>/dev/null || true
+        else
+            git checkout -q master 2>/dev/null || true
+        fi
         git fetch --quiet 2>/dev/null || true
     else
         info "Fetching AUR repository for $package..."
         rm -rf "$work_dir"
-        git clone "https://aur.archlinux.org/$package.git" "$work_dir" || {
-            error "Clone failed, package may not exist"
-            exit 1
-        }
+
+        # Clone from appropriate source
+        if [[ "$use_github" == true ]]; then
+            git clone --branch "$package" --single-branch \
+                "https://github.com/archlinux/aur.git" "$work_dir" || {
+                error "Clone failed from GitHub mirror"
+                error "Package branch may not exist or mirror is unavailable"
+                exit 1
+            }
+        else
+            git clone "https://aur.archlinux.org/$package.git" "$work_dir" || {
+                error "Clone failed, package may not exist"
+                exit 1
+            }
+        fi
+
         cd "$work_dir" || {
             error "Failed to access directory $work_dir"
             exit 1
@@ -188,6 +212,13 @@ main() {
             error "Package repository is empty or package does not exist"
             exit 1
         fi
+    fi
+
+    # Show warning for GitHub mirror usage
+    if [[ "$use_github" == true ]]; then
+        echo
+        warning "Using GitHub AUR mirror (read-only experimental mirror)"
+        echo
     fi
 
     # Get currently installed version
@@ -210,13 +241,9 @@ main() {
     )
     local random_tip="${tips[$RANDOM % ${#tips[@]}]}"
 
-    # Build header with current version info (align with data columns)
-    local hash_header
-    local version_header
-    local time_header="Time"
-    hash_header=$(printf "%-16s" "Git Hash")
-    version_header=$(printf "%-20s" "Version")
-    local header_text="${hash_header}${version_header}${time_header}"
+    # Build header with current version info (fixed-width + tab-separated)
+    local header_text
+    header_text=$(printf "%-20s\t%-24s\t%s" "Version" "Time" "Git Hash")
 
     if [[ -n "$current_version" ]]; then
         header_text="$header_text"$'\n'"Currently installed: $current_version"
@@ -226,7 +253,7 @@ main() {
 
     local selected
     selected=$(
-        git log --format="%H" | while read -r hash; do
+        git log --format="%H %ai" | while IFS=' ' read -r hash date time tz; do
             # Use git show to read PKGBUILD without checking out (much faster)
             pkgbuild_content=$(git show "$hash:PKGBUILD" 2>/dev/null)
 
@@ -238,18 +265,17 @@ main() {
                 version="?"
             fi
 
-            short_hash=$(echo "$hash" | cut -c1-7)
-            date=$(git log -1 --format="%ai" "$hash" | awk '{print $1, $2}')
+            short_hash=${hash:0:7}
 
-            # Output formatted line
-            printf "%-16s%-20s%-20s\n" "$short_hash" "$version" "$date"
+            # Output formatted line (fixed-width for alignment, tab-separated for parsing)
+            printf "%-20s\t%-24s\t%s\n" "$version" "$date $time" "$short_hash"
         done | \
         fzf --ansi \
             --prompt="$random_tip > " \
             --header="$header_text" \
-            --preview="git -C $work_dir show --stat {1} && \
+            --preview="git -C $work_dir show --stat {-1} && \
                        echo && echo '━━━━━ PKGBUILD ━━━━━' && echo && \
-                       git -C $work_dir show {1}:PKGBUILD" \
+                       git -C $work_dir show {-1}:PKGBUILD" \
             --preview-window=right:50%:wrap
     )
 
@@ -258,11 +284,11 @@ main() {
         exit 0
     fi
 
-    # Extract selected hash
+    # Extract selected hash (using tab as delimiter, trim trailing spaces)
     local selected_hash
     local selected_version
-    selected_hash=$(echo "$selected" | awk '{print $1}')
-    selected_version=$(echo "$selected" | awk '{print $2}')
+    selected_version=$(echo "$selected" | cut -f1 | xargs)
+    selected_hash=$(echo "$selected" | cut -f3)
 
     info "Switching to commit $selected_hash (version: $selected_version)..."
     git checkout "$selected_hash" || {
