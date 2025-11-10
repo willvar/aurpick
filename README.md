@@ -4,7 +4,7 @@
 
 ---
 
-Easily install any version of AUR packages — current, historical, or newer.
+Easily install a specific version of AUR packages — current, historical, or newer.
 
 **aurpick** lets you browse complete Git history, preview PKGBUILDs, and pick the exact version you need.
 
@@ -15,7 +15,8 @@ Easily install any version of AUR packages — current, historical, or newer.
 - **Version Information** - Automatically parse PKGBUILD version from each commit
 - **Live Preview** - View commit information and PKGBUILD content
 - **Official Package Redirect** - Auto-detect official repo packages and invoke `downgrade`
-- **GitHub Mirror Support** - Optional GitHub AUR mirror for package fetching
+- **GitHub Mirror Support** - Optional GitHub AUR mirror to reduce load on official AUR and avoid service disruptions
+- **No AUR Helper Required** - Works independently using only git and makepkg
 - **Development Mode** - Preserve temporary files for debugging
 
 ## Dependencies
@@ -49,6 +50,22 @@ aurpick --github yay
 aurpick --dev yay
 ```
 
+## ⚠️ Important Limitations
+
+**Using aurpick is pointless or will fail for at least the following types of packages:**
+
+1. **VCS packages** (`-git`, `-svn`, `-hg`, etc.)
+   - These packages use `pkgver()` functions to dynamically fetch the latest upstream source code during build time
+   - Even if you select a historical PKGBUILD, it will still build the current upstream version
+
+2. **Packages with version-agnostic download URLs**
+   - Source URLs like `https://example.com/latest.tar.xz` always point to the newest file
+   - Selecting historical PKGBUILDs won't fetch the corresponding historical source files
+
+3. **Packages with deleted upstream sources**
+   - If upstream has removed old release files, downloads will fail with 404 errors
+   - The `--skipchecksums` flag can only skip verification, not solve missing files
+
 ## How It Works
 
 1. Clone the AUR Git repository for the specified package (from official AUR or GitHub mirror)
@@ -65,8 +82,8 @@ aurpick --dev yay
 
 ## Usage Tips
 
-- This tool focuses on **AUR packages**. Official repository packages are automatically redirected to the `downgrade` tool
-- Older versions may have checksum mismatches due to changed upstream sources. You can skip verification if needed
+- This tool focuses on **AUR packages**. Official repository packages will be redirected to the `downgrade` tool if available
+- Older versions may encounter checksum mismatches. You can skip verification if needed
 
 ## Development
 
