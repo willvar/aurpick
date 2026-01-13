@@ -26,27 +26,22 @@ warning() { echo -e "${YELLOW}==>${NC} $*"; }
 error() { echo -e "${RED}==>${NC} $*" >&2; }
 
 # Parse version from PKGBUILD content (accepts content via stdin or parameter)
+# Sources PKGBUILD to evaluate dynamic version definitions (e.g., pkgver=$(cmd))
 parse_pkgbuild_version() {
     local content="$1"
-    local pkgver pkgrel epoch
 
-    # If no parameter, read from stdin
     [[ -z "$content" ]] && content=$(cat)
 
-    # Extract version components
-    pkgver=$(echo "$content" | grep -m1 '^pkgver=' | cut -d'=' -f2 | tr -d '"' | tr -d "'")
-    pkgrel=$(echo "$content" | grep -m1 '^pkgrel=' | cut -d'=' -f2 | tr -d '"' | tr -d "'")
-    epoch=$(echo "$content" | grep -m1 '^epoch=' | cut -d'=' -f2 | tr -d '"' | tr -d "'")
+    local result
+    result=$(
+        source <(echo "$content") 2>/dev/null
+        [[ -n "$pkgver" ]] && printf '%s' "${epoch:+$epoch:}${pkgver}-${pkgrel}"
+    )
 
-    # Handle empty values
-    [[ -z "$pkgver" ]] && pkgver="?"
-    [[ -z "$pkgrel" ]] && pkgrel="?"
-
-    # Build version string with epoch if present
-    if [[ -n "$epoch" && "$epoch" != "?" ]]; then
-        echo "${epoch}:${pkgver}-${pkgrel}"
+    if [[ -z "$result" || ! "$result" =~ -[0-9] ]]; then
+        echo "?"
     else
-        echo "${pkgver}-${pkgrel}"
+        echo "$result"
     fi
 }
 
@@ -253,7 +248,7 @@ main() {
 
     local selected
     selected=$(
-        git log --format="%H %ai" | while IFS=' ' read -r hash date time tz; do
+        git log --format="%H %ai" | while IFS=' ' read -r hash date time; do
             # Use git show to read PKGBUILD without checking out (much faster)
             pkgbuild_content=$(git show "$hash:PKGBUILD" 2>/dev/null)
 
