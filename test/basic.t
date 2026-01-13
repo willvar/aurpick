@@ -10,7 +10,7 @@ Test script syntax is valid:
 
 Test help message when no argument provided:
   $ ./aurpick 2>&1 | sed 's/\x1b\[[0-9;]*m//g' | head -2
-  ==> Usage: .*/aurpick \[--dev\] <package-name> (re)
+  ==> Usage: .*/aurpick \[--dev\] \[--github\] <package-name> (re)
   Example: .*/aurpick yay (re)
 
 Test exit code for no argument:

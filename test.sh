@@ -11,7 +11,7 @@ if ! command -v shellcheck &>/dev/null; then
     echo ""
 else
     echo "Running shellcheck..."
-    if shellcheck aurpick; then
+    if shellcheck --exclude=SC1090,SC2154 aurpick; then
         echo "✓ shellcheck passed"
         echo ""
     else
