@@ -3,9 +3,9 @@ Test --version parameter
 Setup:
   $ cd "$TESTDIR/.."
 
-Test --version flag outputs correct version:
+Test --version flag outputs hash:
   $ ./aurpick --version
-  aurpick version 1.0.0
+  aurpick \([0-9a-f]{7}\) (re)
 
 Test --version exit code is 0:
   $ ./aurpick --version >/dev/null
@@ -14,7 +14,7 @@ Test --version exit code is 0:
 
 Test -v short flag also works:
   $ ./aurpick -v
-  aurpick version 1.0.0
+  aurpick \([0-9a-f]{7}\) (re)
 
 Test -v exit code is 0:
   $ ./aurpick -v >/dev/null

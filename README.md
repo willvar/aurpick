@@ -16,19 +16,21 @@ Easily install a specific version of AUR packages — current, historical, or ne
 - **Live Preview** - View commit information and PKGBUILD content
 - **Official Package Redirect** - Auto-detect official repo packages and invoke `downgrade`
 - **GitHub Mirror Support** - Optional GitHub AUR mirror to reduce load on official AUR and avoid service disruptions
+- **Wayback Fallback** - Try archived source files when upstream URLs are gone, while still honoring `makepkg` integrity checks
 - **No AUR Helper Required** - Works independently using only git and makepkg
 - **Development Mode** - Preserve temporary files for debugging
 
 ## Dependencies
 
 - `git` - Clone AUR repositories
+- `curl` - Probe source URLs and query Wayback Machine
 - `fzf` - Interactive selection interface
 - `base-devel` - Build AUR packages (includes `makepkg`)
 - `downgrade` (optional) - Handle official repository packages
 
 Install dependencies:
 ```bash
-sudo pacman -S git fzf base-devel
+sudo pacman -S git curl fzf base-devel
 ```
 
 ## Usage
@@ -48,6 +50,9 @@ aurpick --github yay
 
 # Development mode (preserve temporary files for debugging)
 aurpick --dev yay
+
+# Disable archived-source fallback and use only live upstream URLs
+aurpick --no-wayback yay
 ```
 
 ## ⚠️ Important Limitations
@@ -63,8 +68,8 @@ aurpick --dev yay
    - Selecting historical PKGBUILDs won't fetch the corresponding historical source files
 
 3. **Packages with deleted upstream sources**
-   - If upstream has removed old release files, downloads will fail with 404 errors
-   - The `--skipchecksums` flag can only skip verification, not solve missing files
+   - aurpick can try the Wayback Machine when a live HTTP(S) source disappears
+   - By default, recovery still fails if there is no archived copy or the archived file does not pass `makepkg` verification
 
 ## How It Works
 
@@ -72,18 +77,22 @@ aurpick --dev yay
 2. Traverse all commit history and extract PKGBUILD version information
 3. Provide interactive selection interface via fzf
 4. Switch to the selected historical commit
-5. Build and install using `makepkg`
+5. Verify sources with `makepkg`, optionally trying Wayback for missing HTTP(S) files
+6. Build and install using `makepkg`
 
 ## Options
 
 - `--dev` - Development mode, preserve temporary files in `/tmp/aurpick-<package>`
 - `--github` - Use GitHub AUR mirror instead of official AUR source
+- `--no-wayback` - Disable Wayback fallback and rely only on live upstream source URLs
 - `--version` / `-v` - Show version information
 
 ## Usage Tips
 
 - This tool focuses on **AUR packages**. Official repository packages will be redirected to the `downgrade` tool if available
 - Older versions may encounter checksum mismatches. You can skip verification if needed
+- Wayback fallback only applies to unreachable `http://` and `https://` sources; VCS sources such as `git+...` are unchanged
+- Archived files go through normal `makepkg` integrity checks unless you explicitly choose `--skipchecksums` after a verification failure
 
 ## Development
 

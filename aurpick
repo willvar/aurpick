@@ -3,14 +3,16 @@
 # License: MIT
 # Usage: aurpick <package-name>
 
-VERSION="1.0.0"
-
 # Color definitions
 RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
 BLUE='\033[0;34m'
 NC='\033[0m' # No Color
+
+LAST_FAILED_SOURCES=()
+LAST_INTEGRITY_FAILURE=false
+AURPICK_HTTP_USER_AGENT='Mozilla/5.0 (X11; Linux x86_64; rv:128.0) Gecko/20100101 Firefox/128.0'
 
 # Check if running as root
 if [[ $EUID -eq 0 ]]; then
@@ -24,6 +26,285 @@ info() { echo -e "${BLUE}==>${NC} $*"; }
 success() { echo -e "${GREEN}==>${NC} $*"; }
 warning() { echo -e "${YELLOW}==>${NC} $*"; }
 error() { echo -e "${RED}==>${NC} $*" >&2; }
+
+# Shared curl wrapper for consistent timeouts and User-Agent
+curl_request() {
+    curl -A "$AURPICK_HTTP_USER_AGENT" "$@"
+}
+
+# Probe whether a live source URL is still reachable
+curl_probe_url() {
+    local url="$1"
+
+    curl_request -fsIL --connect-timeout 10 --max-time 20 "$url" >/dev/null 2>&1 || \
+        curl_request -fsL --range 0-0 --connect-timeout 10 --max-time 20 "$url" >/dev/null 2>&1
+}
+
+# Query Wayback CDX with retries to reduce transient failures
+curl_wayback_cdx() {
+    local url="$1"
+
+    curl_request -fsL --get \
+        --retry 2 \
+        --retry-delay 1 \
+        --retry-all-errors \
+        --connect-timeout 15 \
+        --max-time 60 \
+        --data-urlencode "url=$url" \
+        --data-urlencode "output=json" \
+        --data-urlencode "fl=timestamp,original,statuscode,mimetype,length" \
+        --data-urlencode "filter=statuscode:200" \
+        --data-urlencode "limit=-5" \
+        "https://web.archive.org/cdx/search/cdx"
+}
+
+# Download a file to disk with consistent retry policy
+curl_download_file() {
+    local output_path="$1"
+    local url="$2"
+
+    curl_request -fL --connect-timeout 15 --retry 2 -o "$output_path" "$url"
+}
+
+# Print a short summary of which source files failed integrity checks
+summarize_failed_sources() {
+    local output="$1"
+    local line
+
+    LAST_FAILED_SOURCES=()
+    LAST_INTEGRITY_FAILURE=false
+
+    while IFS= read -r line; do
+        [[ $line =~ ^[[:space:]]*([^[:space:]].*)[[:space:]]+\.\.\.[[:space:]]+FAILED$ ]] || continue
+        LAST_FAILED_SOURCES+=("${BASH_REMATCH[1]}")
+    done <<< "$output"
+
+    [[ ${#LAST_FAILED_SOURCES[@]} -gt 0 ]] || return 0
+    LAST_INTEGRITY_FAILURE=true
+    warning "Integrity check failed for:"
+
+    local failed_source
+    for failed_source in "${LAST_FAILED_SOURCES[@]}"; do
+        warning "  - $failed_source"
+    done
+}
+
+# Run makepkg while preserving its output for post-failure summaries
+run_makepkg_logged() {
+    local output
+    local status
+
+    LAST_FAILED_SOURCES=()
+    LAST_INTEGRITY_FAILURE=false
+
+    output=$("$@" 2>&1)
+    status=$?
+    printf '%s\n' "$output"
+
+    if [[ $status -ne 0 ]]; then
+        summarize_failed_sources "$output"
+    fi
+
+    return $status
+}
+
+# Extract a source filename and URL from a PKGBUILD source entry
+parse_source_entry() {
+    local entry="$1"
+    local filename=""
+    local url="$entry"
+
+    if [[ "$entry" == *::* ]]; then
+        filename=${entry%%::*}
+        url=${entry#*::}
+    fi
+
+    if [[ -z "$filename" ]]; then
+        filename=${url##*/}
+        filename=${filename%%\?*}
+    fi
+
+    printf '%s\n%s\n' "$filename" "$url"
+}
+
+# Read source arrays from the current PKGBUILD, including arch-specific entries
+collect_pkgbuild_sources() {
+    local arch
+    arch=$(uname -m)
+
+    (
+        # shellcheck source=/dev/null
+        source ./PKGBUILD 2>/dev/null || exit 1
+
+        local array_name
+        local entries=()
+        for array_name in source "source_${arch}"; do
+            if declare -p "$array_name" &>/dev/null; then
+                eval "entries=(\"\${${array_name}[@]}\")"
+                printf '%s\n' "${entries[@]}"
+            fi
+        done
+    )
+}
+
+# Check whether a source URL is still reachable from the live site
+source_url_is_reachable() {
+    local url="$1"
+
+    curl_probe_url "$url"
+}
+
+# Return candidate raw Wayback URLs from the CDX index, newest first
+get_wayback_snapshot_urls() {
+    local url="$1"
+    local response
+    local payload
+    local snapshot_pattern='\["([0-9]{14})","([^"]+)"'
+
+    response=$(curl_wayback_cdx "$url") || {
+        warning "Failed to query Wayback CDX index"
+        return 1
+    }
+    response=${response//$'\n'/ }
+
+    [[ "$response" =~ \[\[ ]] || {
+        warning "Wayback CDX returned an unexpected response"
+        return 1
+    }
+
+    payload=${response#*],}
+    while [[ "$payload" =~ $snapshot_pattern ]]; do
+        printf 'https://web.archive.org/web/%sid_/%s\n' "${BASH_REMATCH[1]}" "${BASH_REMATCH[2]}"
+        payload=${payload#*"${BASH_REMATCH[0]}"}
+    done
+}
+
+# Download a source file from Wayback into the provided source cache directory
+download_wayback_source() {
+    local url="$1"
+    local filename="$2"
+    local srcdest_dir="$3"
+    local archive_url
+    local tmpfile
+    local attempt=0
+    local total=0
+    local candidates=()
+
+    tmpfile="$srcdest_dir/$filename.part"
+
+    mapfile -t candidates < <(get_wayback_snapshot_urls "$url")
+    total=${#candidates[@]}
+
+    for archive_url in "${candidates[@]}"; do
+        [[ -n "$archive_url" ]] || continue
+        ((attempt++))
+
+        if [[ "$archive_url" =~ /web/([0-9]{14})id_/ ]]; then
+            info "Trying Wayback snapshot $attempt/$total: ${BASH_REMATCH[1]}"
+        else
+            info "Trying Wayback snapshot $attempt/$total"
+        fi
+
+        if curl_download_file "$tmpfile" "$archive_url"; then
+            mv "$tmpfile" "$srcdest_dir/$filename"
+            return 0
+        fi
+
+        if [[ "$archive_url" =~ /web/([0-9]{14})id_/ ]]; then
+            warning "Wayback snapshot download failed: ${BASH_REMATCH[1]}"
+        else
+            warning "Wayback snapshot download failed"
+        fi
+
+        rm -f "$tmpfile"
+    done
+
+    return 1
+}
+
+# Recover unreachable HTTP(S) sources from Wayback into a dedicated SRCDEST
+try_wayback_source_fallback() {
+    local srcdest_dir="$1"
+    local recovered=0
+    local entry
+    local parsed=()
+    local filename
+    local url
+
+    while IFS= read -r entry; do
+        [[ -z "$entry" ]] && continue
+
+        mapfile -t parsed < <(parse_source_entry "$entry")
+        filename=${parsed[0]}
+        url=${parsed[1]}
+
+        [[ "$url" =~ ^https?:// ]] || continue
+        [[ -n "$filename" ]] || continue
+        [[ -s "$srcdest_dir/$filename" ]] && continue
+
+        if source_url_is_reachable "$url"; then
+            continue
+        fi
+
+        info "Source unavailable, checking Wayback: $filename"
+        if download_wayback_source "$url" "$filename" "$srcdest_dir"; then
+            success "Recovered source from Wayback: $filename"
+            ((recovered++))
+        else
+            warning "Wayback has no usable archived copy for: $filename"
+        fi
+    done < <(collect_pkgbuild_sources)
+
+    [[ $recovered -gt 0 ]]
+}
+
+# Verify sources first so failed downloads can be recovered before a full build
+verify_sources_with_fallback() {
+    local srcdest_dir="$1"
+    local use_wayback_fallback="$2"
+    shift
+    shift
+    local verify_flags=("$@")
+
+    if run_makepkg_logged env SRCDEST="$srcdest_dir" makepkg "${verify_flags[@]}"; then
+        return 0
+    fi
+
+    [[ "$use_wayback_fallback" == true ]] || return 1
+
+    warning "Source verification failed"
+    if ! try_wayback_source_fallback "$srcdest_dir"; then
+        return 1
+    fi
+
+    info "Retrying source verification with recovered files..."
+    run_makepkg_logged env SRCDEST="$srcdest_dir" makepkg "${verify_flags[@]}"
+}
+
+# Prepare sources and optionally retry with --skipchecksums after integrity failures
+prepare_sources_for_build() {
+    local srcdest_dir="$1"
+    local use_wayback_fallback="$2"
+    local makepkg_flags_name="$3"
+    local verify_flags_name="$4"
+    local -n makepkg_flags_ref="$makepkg_flags_name"
+    local -n verify_flags_ref="$verify_flags_name"
+
+    if verify_sources_with_fallback "$srcdest_dir" "$use_wayback_fallback" "${verify_flags_ref[@]}"; then
+        return 0
+    fi
+
+    if [[ "$LAST_INTEGRITY_FAILURE" == true ]] && confirm "Skip all checksum verification and continue?"; then
+        # shellcheck disable=SC2034 # nameref assignment updates the caller's makepkg flags
+        makepkg_flags_ref=(--skipchecksums -si)
+        verify_flags_ref=(--verifysource --skipchecksums)
+        info "Will use --skipchecksums flag"
+        verify_sources_with_fallback "$srcdest_dir" "$use_wayback_fallback" "${verify_flags_ref[@]}"
+        return $?
+    fi
+
+    return 1
+}
 
 # Parse version from PKGBUILD content (accepts content via stdin or parameter)
 # Sources PKGBUILD to evaluate dynamic version definitions (e.g., pkgver=$(cmd))
@@ -65,7 +346,7 @@ confirm() {
 # Check dependencies
 check_dependencies() {
     local missing=()
-    for cmd in git fzf makepkg; do
+    for cmd in git fzf makepkg curl; do
         if ! command -v "$cmd" &>/dev/null; then
             missing+=("$cmd")
         fi
@@ -73,7 +354,7 @@ check_dependencies() {
 
     if [[ ${#missing[@]} -gt 0 ]]; then
         error "Missing dependencies: ${missing[*]}"
-        error "Please install: sudo pacman -S git fzf base-devel"
+        error "Please install: sudo pacman -S git curl fzf base-devel"
         exit 1
     fi
 }
@@ -112,13 +393,14 @@ get_pkgbuild_version() {
 main() {
     local dev_mode=false
     local use_github=false
+    local use_wayback_fallback=true
     local package=""
 
     # Parse arguments
     while [[ $# -gt 0 ]]; do
         case "$1" in
             --version|-v)
-                echo "aurpick version $VERSION"
+                echo "aurpick ($(sha256sum "$0" | cut -c1-7))"
                 exit 0
                 ;;
             --dev)
@@ -127,6 +409,10 @@ main() {
                 ;;
             --github)
                 use_github=true
+                shift
+                ;;
+            --no-wayback)
+                use_wayback_fallback=false
                 shift
                 ;;
             *)
@@ -138,12 +424,13 @@ main() {
 
     # Check arguments
     if [[ -z "$package" ]]; then
-        error "Usage: $0 [--dev] [--github] <package-name>"
+        error "Usage: $0 [--dev] [--github] [--no-wayback] <package-name>"
         echo "Example: $0 yay"
         echo "         $0 --github yay"
         echo "Options:"
         echo "  --dev       Development mode (preserve temporary files)"
         echo "  --github    Use GitHub AUR mirror instead of aur.archlinux.org"
+        echo "  --no-wayback Disable Wayback fallback for missing source files"
         echo "  --version   Show version information"
         exit 1
     fi
@@ -302,12 +589,7 @@ main() {
     # Ask if view PKGBUILD
     confirm "View PKGBUILD?" && less PKGBUILD
 
-    # Ask if skip checksums
     local makepkg_flags=(-si)
-    if confirm "Skip all checksum verification?"; then
-        makepkg_flags=(--skipchecksums -si)
-        info "Will use --skipchecksums flag"
-    fi
 
     # Ask if continue building
     if ! confirm "Continue to build and install?"; then
@@ -315,9 +597,18 @@ main() {
         exit 0
     fi
 
+    local srcdest_dir="$work_dir/.srcdest"
+    local verify_flags=(--verifysource)
+    mkdir -p "$srcdest_dir"
+
+    if ! prepare_sources_for_build "$srcdest_dir" "$use_wayback_fallback" makepkg_flags verify_flags; then
+        error "Source verification failed"
+        exit 1
+    fi
+
     # Build and install
     info "Building $package-$selected_version..."
-    if makepkg "${makepkg_flags[@]}"; then
+    if SRCDEST="$srcdest_dir" makepkg "${makepkg_flags[@]}"; then
         echo
         success "Installation complete!"
         echo
@@ -329,4 +620,6 @@ main() {
     fi
 }
 
-main "$@"
+if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
+    main "$@"
+fi

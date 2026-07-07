@@ -3,7 +3,7 @@ Test behavior when downgrade IS installed
 Setup - create isolated PATH with downgrade and mock sudo:
   $ cd "$TESTDIR/.."
   $ export TESTBIN=$(mktemp -d)
-  $ for cmd in bash sed grep head awk cut tr git pacman fzf makepkg; do \
+  $ for cmd in bash sed grep head awk cut tr git pacman fzf makepkg curl; do \
   >   which $cmd >/dev/null 2>&1 && ln -sf $(which $cmd) $TESTBIN/; \
   > done
 

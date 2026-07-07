@@ -10,7 +10,7 @@ Test script syntax is valid:
 
 Test help message when no argument provided:
   $ ./aurpick 2>&1 | sed 's/\x1b\[[0-9;]*m//g' | head -2
-  ==> Usage: .*/aurpick \[--dev\] \[--github\] <package-name> (re)
+  ==> Usage: .*/aurpick \[--dev\] \[--github\] \[--no-wayback\] <package-name> (re)
   Example: .*/aurpick yay (re)
 
 Test exit code for no argument:
@@ -23,3 +23,7 @@ Test missing dependencies detection:
   $ PATH="$TESTBIN" ./aurpick yay 2>&1 | sed 's/\x1b\[[0-9;]*m//g' | head -1
   ==> Missing dependencies:.* (re)
   $ rm -rf $TESTBIN
+
+Test --no-wayback without package still shows updated usage:
+  $ ./aurpick --no-wayback 2>&1 | sed 's/\x1b\[[0-9;]*m//g' | head -1
+  ==> Usage: .*/aurpick \[--dev\] \[--github\] \[--no-wayback\] <package-name> (re)

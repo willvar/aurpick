@@ -3,7 +3,7 @@ Test handling of invalid/non-existent packages
 Setup - create isolated PATH with all required dependencies:
   $ cd "$TESTDIR/.."
   $ export TESTBIN=$(mktemp -d)
-  $ for cmd in bash sed grep head awk cut tr git fzf makepkg pacman timeout rm mkdir cat; do \
+  $ for cmd in bash sed grep head awk cut tr git fzf makepkg pacman curl timeout rm mkdir cat; do \
   >   which $cmd >/dev/null 2>&1 && ln -sf $(which $cmd) $TESTBIN/; \
   > done
 
