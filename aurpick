@@ -22,10 +22,10 @@ if [[ $EUID -eq 0 ]]; then
 fi
 
 # Print colored messages
-info() { echo -e "${BLUE}==>${NC} $*"; }
-success() { echo -e "${GREEN}==>${NC} $*"; }
-warning() { echo -e "${YELLOW}==>${NC} $*"; }
-error() { echo -e "${RED}==>${NC} $*" >&2; }
+info() { printf '%b%s\n' "${BLUE}==>${NC} " "$*"; }
+success() { printf '%b%s\n' "${GREEN}==>${NC} " "$*"; }
+warning() { printf '%b%s\n' "${YELLOW}==>${NC} " "$*"; }
+error() { printf '%b%s\n' "${RED}==>${NC} " "$*" >&2; }
 
 # Shared curl wrapper for consistent timeouts and User-Agent
 curl_request() {
@@ -306,24 +306,51 @@ prepare_sources_for_build() {
     return 1
 }
 
-# Parse version from PKGBUILD content (accepts content via stdin or parameter)
-# Sources PKGBUILD to evaluate dynamic version definitions (e.g., pkgver=$(cmd))
-parse_pkgbuild_version() {
-    local content="$1"
+# Parse the evaluated version fields from .SRCINFO without executing PKGBUILD code
+parse_srcinfo_version() {
+    local content="${1-}"
+    local line
+    local key
+    local value
+    local pkgver=""
+    local pkgrel=""
+    local epoch=""
 
-    [[ -z "$content" ]] && content=$(cat)
+    while IFS= read -r line; do
+        [[ "$line" =~ ^[[:space:]]*(epoch|pkgver|pkgrel)[[:space:]]*=[[:space:]]*(.*)$ ]] || continue
+        key=${BASH_REMATCH[1]}
+        value=${BASH_REMATCH[2]}
+        value=${value%"${value##*[![:space:]]}"}
 
-    local result
-    result=$(
-        source <(echo "$content") 2>/dev/null
-        [[ -n "$pkgver" ]] && printf '%s' "${epoch:+$epoch:}${pkgver}-${pkgrel}"
-    )
+        case "$key" in
+            epoch) [[ -z "$epoch" ]] && epoch="$value" ;;
+            pkgver) [[ -z "$pkgver" ]] && pkgver="$value" ;;
+            pkgrel) [[ -z "$pkgrel" ]] && pkgrel="$value" ;;
+        esac
+    done <<< "$content"
 
-    if [[ -z "$result" || ! "$result" =~ -[0-9] ]]; then
+    if [[ -z "$pkgver" || "$pkgver" == *[[:space:]/:-]* || \
+        "$pkgver" == *[![:ascii:]]* || "$pkgver" == *[[:cntrl:]]* ]]; then
         echo "?"
-    else
-        echo "$result"
+        return
     fi
+    [[ "$pkgrel" =~ ^[0-9]+([.][0-9]+)?$ ]] || { echo "?"; return; }
+    [[ -z "$epoch" || "$epoch" =~ ^[0-9]+$ ]] || { echo "?"; return; }
+
+    printf '%s\n' "${epoch:+$epoch:}${pkgver}-${pkgrel}"
+}
+
+# Read a historical version from committed metadata only
+get_commit_version() {
+    local hash="$1"
+    local srcinfo_content
+
+    srcinfo_content=$(git show "$hash:.SRCINFO" 2>/dev/null) || {
+        echo "?"
+        return
+    }
+
+    parse_srcinfo_version "$srcinfo_content"
 }
 
 # Ask user for yes/no confirmation
@@ -382,11 +409,6 @@ check_official_repo() {
             exit 1
         fi
     fi
-}
-
-# Extract version from PKGBUILD file
-get_pkgbuild_version() {
-    [[ -f PKGBUILD ]] && parse_pkgbuild_version "$(cat PKGBUILD)" || echo "?"
 }
 
 # Main function
@@ -510,9 +532,6 @@ main() {
         info "Currently installed: $current_version"
     fi
 
-    # Use fzf to select version (with streaming data)
-    info "Loading version history (you can select while loading)..."
-
     # Random prompt tips
     local tips=(
         "Type to search • ESC/Ctrl+C/Ctrl+D to exit"
@@ -536,16 +555,8 @@ main() {
     local selected
     selected=$(
         git log --format="%H %ai" | while IFS=' ' read -r hash date time; do
-            # Use git show to read PKGBUILD without checking out (much faster)
-            pkgbuild_content=$(git show "$hash:PKGBUILD" 2>/dev/null)
-
-            # Extract version info from PKGBUILD content
-            if [[ -n "$pkgbuild_content" ]]; then
-                version=$(echo "$pkgbuild_content" | parse_pkgbuild_version)
-                [[ -z "$version" || "$version" == "?-?" ]] && version="?"
-            else
-                version="?"
-            fi
+            # .SRCINFO contains evaluated metadata and is safe to parse as text.
+            version=$(get_commit_version "$hash")
 
             short_hash=${hash:0:7}
 
@@ -569,8 +580,9 @@ main() {
     # Extract selected hash (using tab as delimiter, trim trailing spaces)
     local selected_hash
     local selected_version
-    selected_version=$(echo "$selected" | cut -f1 | xargs)
-    selected_hash=$(echo "$selected" | cut -f3)
+    selected_version=${selected%%$'\t'*}
+    selected_version=${selected_version%"${selected_version##*[![:space:]]}"}
+    selected_hash=${selected##*$'\t'}
 
     info "Switching to commit $selected_hash (version: $selected_version)..."
     git checkout "$selected_hash" || {

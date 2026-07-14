@@ -12,7 +12,7 @@ Easily install a specific version of AUR packages — current, historical, or ne
 
 - **Complete History Browsing** - View all Git commit history of the package
 - **Interactive Selection** - Powerful search and filtering via fzf
-- **Version Information** - Automatically parse PKGBUILD version from each commit
+- **Safe Version Information** - Parse evaluated version metadata from each commit's `.SRCINFO` without executing historical PKGBUILDs
 - **Live Preview** - View commit information and PKGBUILD content
 - **Official Package Redirect** - Auto-detect official repo packages and invoke `downgrade`
 - **GitHub Mirror Support** - Optional GitHub AUR mirror to reduce load on official AUR and avoid service disruptions
@@ -74,7 +74,7 @@ aurpick --no-wayback yay
 ## How It Works
 
 1. Clone the AUR Git repository for the specified package (from official AUR or GitHub mirror)
-2. Traverse all commit history and extract PKGBUILD version information
+2. Traverse all commit history and extract evaluated version information from `.SRCINFO`
 3. Provide interactive selection interface via fzf
 4. Switch to the selected historical commit
 5. Verify sources with `makepkg`, optionally trying Wayback for missing HTTP(S) files
@@ -91,6 +91,7 @@ aurpick --no-wayback yay
 
 - This tool focuses on **AUR packages**. Official repository packages will be redirected to the `downgrade` tool if available
 - Older versions may encounter checksum mismatches. You can skip verification if needed
+- History versions come from committed `.SRCINFO` metadata; stale metadata may differ from the PKGBUILD or final build result
 - Wayback fallback only applies to unreachable `http://` and `https://` sources; VCS sources such as `git+...` are unchanged
 - Archived files go through normal `makepkg` integrity checks unless you explicitly choose `--skipchecksums` after a verification failure
 
